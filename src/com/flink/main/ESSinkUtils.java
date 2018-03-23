@@ -24,7 +24,7 @@ public class ESSinkUtils {
 		config.put("cluster.name", "elasticsearch_shankarganesh");
 		
 		// This instructs the sink to emit after every element, otherwise they would be buffered
-		config.put("bulk.flush.max.actions", "1");
+		config.put("bulk.flush.max.actions", "1000");
 		return config;
 	}
 	
