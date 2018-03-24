@@ -1,4 +1,4 @@
-package com.flink.main;
+package com.flink.models;
 
 public class Model {
 

@@ -1,4 +1,4 @@
-package com.flink.main;
+package com.flink.models;
 
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.Text;

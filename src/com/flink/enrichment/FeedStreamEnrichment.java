@@ -1,4 +1,4 @@
-package com.flink.main;
+package com.flink.enrichment;
 
 import java.util.Collections;
 
@@ -13,10 +13,14 @@ import org.apache.http.concurrent.FutureCallback;
 import org.apache.http.impl.nio.client.CloseableHttpAsyncClient;
 import org.apache.http.impl.nio.client.HttpAsyncClients;
 
+import com.flink.constants.Constants;
+import com.flink.models.ItemModel;
+import com.flink.transformer.Transformer;
 import com.google.gson.JsonParser;
 
 /**
- * Performs stream enrichment by invoking a web service or db
+ * Performs stream enrichment by invoking webservice, performing transformation
+ * and collecting results
  * 
  * @author shankarganesh
  *
@@ -47,18 +51,19 @@ public class FeedStreamEnrichment extends RichAsyncFunction<String, ItemModel> {
 	public void asyncInvoke(String str, AsyncCollector<ItemModel> collector) throws Exception {
 		// issue the asynchronous request, receive a future for result
 		try {
+			// init parsers and transformers
 			JsonParser parser = new JsonParser();
 			Transformer transformer = new Transformer();
+			
+			// init web service request
 			HttpGet request1 = new HttpGet(Constants.ITEM_BASE_ENDPOINT + str);
 			request1.addHeader("Authorization", Constants.TOKEN);
 
-			System.out.println("Executing for " + str);
 			asyncHttpClient.execute(request1, new FutureCallback<HttpResponse>() {
 
 				public void completed(final HttpResponse response2) {
 					try {
 						if (response2.getStatusLine().getStatusCode() == 200) {
-							System.out.println("finished " + str);
 							collector.collect(Collections.singleton(transformer.transformItem(parser,
 									IOUtils.toString(response2.getEntity().getContent(), "UTF-8"))));
 						}

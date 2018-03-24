@@ -1,5 +1,7 @@
-package com.flink.main;
+package com.flink.transformer;
 
+import com.flink.models.ItemModel;
+import com.flink.models.Model;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 

@@ -2,27 +2,30 @@ package com.flink.main;
 
 import java.util.concurrent.TimeUnit;
 
-import org.apache.flink.api.common.functions.RuntimeContext;
-import org.apache.flink.api.java.functions.KeySelector;
+import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.AsyncDataStream;
 import org.apache.flink.streaming.api.datastream.DataStream;
-import org.apache.flink.streaming.api.datastream.KeyedStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.connectors.elasticsearch.ElasticsearchSinkFunction;
-import org.apache.flink.streaming.connectors.elasticsearch.RequestIndexer;
-import org.apache.flink.streaming.connectors.elasticsearch5.ElasticsearchSink;
-import org.apache.flink.streaming.connectors.fs.StringWriter;
+import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.streaming.connectors.fs.bucketing.BucketingSink;
-import org.apache.flink.streaming.connectors.fs.bucketing.DateTimeBucketer;
-import org.elasticsearch.action.index.IndexRequest;
-import org.elasticsearch.client.Requests;
 
-import com.google.gson.Gson;
+import com.flink.enrichment.FeedStreamEnrichment;
+import com.flink.keyselector.StringKeySelector;
+import com.flink.models.ItemModel;
+import com.flink.reducer.DuplicationReducer;
+import com.flink.utils.BucketingSinkUtils;
 
 /**
- * Generates tuples by accepting a stream of inputs, and performing
- * enrichment, transformation and indexing
+ * Generates tuples by accepting a stream of inputs, and performing enrichment,
+ * transformation and indexing
+ * 
+ * The process can be divided into the following steps :-
+ * 	Accept inputs from console. You can use netcat : nc -l <port> to accept inputs as a stream
+ * 	Dedupe the incoming stream for <duration>
+ * 	Enrich the deduped stream : Call web service, transform and collect
+ * 	Write the result stream contents to sink
+ * 
  * @author shankarganesh
  *
  */
@@ -31,95 +34,84 @@ public class FeedStreamAsync {
 	public static void main(String[] args) throws Exception {
 
 		// the port to connect to
-		final int port = 9000;
-//		try {
-//			final ParameterTool params = ParameterTool.fromArgs(args);
-//			port = params.getInt("port");
-//		} catch (Exception e) {
-//			System.err.println("No port specified. Please run 'SocketWindowWordCount --port <port>'");
-//			return;
-//		}
+		final int port;
+		try {
+			final ParameterTool params = ParameterTool.fromArgs(args);
+			port = params.getInt("port");
+		} catch (Exception e) {
+			System.err.println("No port specified. Please run 'SocketWindowWordCount --port <port>'");
+			return;
+		}
 
 		// get the execution environment
 		final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-		
-		// set time characteristic : TODO : setting it to processingTime but eventTime might make more sense
+
+		// set time characteristic : TODO : setting it to processingTime but eventTime
+		// might make more sense
 		env.setStreamTimeCharacteristic(TimeCharacteristic.ProcessingTime);
-		
+
 		// enable checkpointing
-		env.enableCheckpointing(500);
-		
+		env.enableCheckpointing(10000);
+
 		// get input data by connecting to the socket
 		DataStream<String> stream = env.socketTextStream("localhost", port, "\n");
-		
-		DataStream<ItemModel> resultStream = AsyncDataStream.unorderedWait(stream, new FeedStreamEnrichment(),
+
+		// dedupe incoming items within a pre defined time window
+		DataStream<String> dedupedStream = stream.keyBy(new StringKeySelector()).timeWindow(Time.minutes(1)).reduce(new DuplicationReducer());
+
+		// enrich the deduped stream
+		DataStream<ItemModel> resultStream = AsyncDataStream.unorderedWait(dedupedStream, new FeedStreamEnrichment(),
 				120, TimeUnit.SECONDS, 100000);
-			
-		// generating keyed stream based on category id
-		KeyedStream<ItemModel, Integer> keyStream = resultStream.keyBy(new KeySelector<ItemModel, Integer>() {
 
-			/**
-			 * 
-			 */
-			private static final long serialVersionUID = 1L;
-
-			@Override
-			public Integer getKey(ItemModel value) throws Exception {
-				// TODO Auto-generated method stub
-				return value.getCategoryId();
-			}
-			
-		});
 		
-//		 // parse the data, group it, window it, and aggregate the counts
-//        DataStream<ItemFileModel> fileStream = resultStream
-//            .flatMap(new FlatMapFunction<ItemModel, ItemFileModel>() {
-//               @Override
-//				public void flatMap(ItemModel value, org.apache.flink.util.Collector<ItemFileModel> out) throws Exception {
-//					
-//            	   		ItemFileModel tuple = new ItemFileModel(new IntWritable(Integer.valueOf(value.getId())), new Text(value.getTitle()), new IntWritable(1));
-//            	   		out.collect(tuple);
-//				}
-//            })
-//            .keyBy("itemId")
-//            .timeWindow(Time.seconds(5))
-//            .reduce(new ReduceFunction<ItemFileModel>() {
-//                @Override
-//                public ItemFileModel reduce(ItemFileModel a, ItemFileModel b) {
-//                    return new ItemFileModel(a.itemId, a.title, new IntWritable(a.count.get() + b.count.get()));
-//                }
-//            });
+		// *************** Section for writing data to sink *********************//
+		
+		// print stream contents to console
+		resultStream.print().setParallelism(1);
+		
+		/**
+		 * Write to BucketingSink
+		 * Configure the bucketing sink within the methods in BucketingSinkUtils()
+		 * Current path is {basePath} / {yyyyMMdd--HHmm} / {categoryId}
+		 * The path can be configured in the com.flink.bucketer.CustomBucketer
+		 */
+		
+		BucketingSinkUtils bucketingSinkUtils = new BucketingSinkUtils();
+		BucketingSink<ItemModel> sink = bucketingSinkUtils.getBucketingSink();
+		resultStream.addSink(sink);
 
-        
-        BucketingSink<ItemModel> sink = new BucketingSink<ItemModel>("/Users/shankarganesh/path");
-        sink.setBucketer(new DateTimeBucketer<ItemModel>("yyyy-MM-dd--HHmm"));
-        sink.setWriter(new StringWriter<ItemModel>());
-        sink.setBatchSize(1024 * 1024 * 400); // this is 400 MB,
-        keyStream.addSink(sink);
-        
+		
+		/**
+		 * Write to ElasticSearch Sink
+		 * Comment the  below section if you are running locally and do not have elasticsearch set up
+		 * 
+		 */
 		// init sink utils
-		ESSinkUtils esSinkUtils = new ESSinkUtils();
-		
-		resultStream.addSink(new ElasticsearchSink<>(esSinkUtils.createConfigMap(), esSinkUtils.createSocketAddresses(), new ElasticsearchSinkFunction<ItemModel>() {
-		    
-			/**
-			 * 
-			 */
-			private static final long serialVersionUID = 1L;
-
-			public IndexRequest createIndexRequest(ItemModel element) {
-				Gson gson = new Gson();
-				return Requests.indexRequest()
-		                .index(Constants.INDEX_NAME)
-		                .type(Constants.TYPE_NAME)
-		                .source(gson.toJson(element));
-		    }
-		    
-		    @Override
-		    public void process(ItemModel element, RuntimeContext ctx, RequestIndexer indexer) {
-		        indexer.add(createIndexRequest(element));
-		    }
-		}));
+		// ESSinkUtils esSinkUtils = new ESSinkUtils();
+		//
+		// resultStream.addSink(new ElasticsearchSink<>(esSinkUtils.createConfigMap(),
+		// esSinkUtils.createSocketAddresses(), new
+		// ElasticsearchSinkFunction<ItemModel>() {
+		//
+		// /**
+		// *
+		// */
+		// private static final long serialVersionUID = 1L;
+		//
+		// public IndexRequest createIndexRequest(ItemModel element) {
+		// Gson gson = new Gson();
+		// return Requests.indexRequest()
+		// .index(Constants.INDEX_NAME)
+		// .type(Constants.TYPE_NAME)
+		// .source(gson.toJson(element));
+		// }
+		//
+		// @Override
+		// public void process(ItemModel element, RuntimeContext ctx, RequestIndexer
+		// indexer) {
+		// indexer.add(createIndexRequest(element));
+		// }
+		// }));
 
 		env.execute("Async Stream Enrichment and Indexing");
 	}

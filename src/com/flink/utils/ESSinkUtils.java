@@ -1,4 +1,4 @@
-package com.flink.main;
+package com.flink.utils;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
